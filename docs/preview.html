@@ -25,7 +25,7 @@
     <google-codelab-step label="Before you begin" duration="0">
 <google-codelab-about codelab-title="Codelab"
                             authors="Workshop"
-                            last-updated="2026-08-12T18:40:27Z"></google-codelab-about>
+                            last-updated="2026-08-13T03:08:54Z"></google-codelab-about>
 <p>Most ticketing sites put buyers in a queue, both to prevent server crashes and to manage high demand. You start your purchase and find yourself behind 14,000 people. The queue moves for forty minutes. When your turn finally comes, you have a short window to pick seats and pay. If you miss that window, your place in line is given away.</p>
 <p>Many real-world tasks follow this pattern: <strong>a task that takes far longer than a single conversation, running against an external system you do not control.</strong> Examples include waiting for a supplier to restock, waiting for a claim approval, or waiting in a queue.</p>
 <p>Standard AI agents live inside a single chat turn, which lasts seconds and is purely reactive. They cannot wait 40 minutes or act autonomously. To solve this, you need a <strong>long-running agent</strong>: a system that stays dormant during long waits, persists context across process restarts, and resumes automatically when woken by an external trigger.</p>
@@ -1514,29 +1514,6 @@ def agree_budget(node_input, ctx):
 <p>Go back to the chat page from step 3. It has been sitting there since, waiting for this step.</p>
 <p>The <strong>ADK web UI</strong> is a developer tool. The State tab, the event stream and the graph are what you want while you are learning, and none of it is something you hand to another person. It does not exist on Cloud Run either.</p>
 <p>The page does exactly what <code>adk web</code> did for you: talks to the agent, shows what it said, lets you answer when it asks something. What it does not do is expose your development tools to whoever has the URL.</p>
-<h3 is-upgraded>Test it locally first</h3>
-<p>Do this before touching Google Cloud. <code>main.py</code> is the same app the container will run, so run it on your laptop and be sure before you spend three minutes on a build.</p>
-<p>👉💻 <strong>Terminal 2:</strong></p>
-<pre><code class="language-bash">cd ~/monstertix/agent
-. ../set_env.sh
-uvicorn main:app --port 8092</code></pre>
-<p>👉 Open <strong>http://127.0.0.1:8092</strong> and book something. Same MonsterTix, same agent, same venue — served by the production entrypoint this time.</p>
-<p>👉💻 And check the endpoint a scheduler would call actually exists:</p>
-<pre><code class="language-bash">curl -s localhost:8092/openapi.json | grep -o &#x27;/trigger/wake&#x27;</code></pre>
-<pre><code>/trigger/wake</code></pre>
-<p>One app, two doors:</p>
-<pre><code>   ┌─ one service ────────────────────────────────────────────┐
-   │  /                        the page, for a person          │
-   │  /wake                    what that page posts to         │
-   │  /apps/concert/trigger/   what a scheduler reaches         │
-   │       pubsub                                              │
-   │                                                           │
-   │       one Runner · one session store · one graph          │
-   └───────────────────────────────────────────────────────────┘</code></pre>
-<p>They are one service on purpose. The page calls <code>/wake</code> on its own address, so there is no cross-origin problem, no second deployment, and no authentication between them. Two services would mean solving all three for nothing.</p>
-<aside class="negative">
-<b>⚠️ <code>adk deploy cloud_run</code> cannot do this.</b> It writes its own entrypoint, which serves the agent and nothing else — no page, no <code>/wake</code> — and there is no flag to give it yours. So the deploy below uses <code>gcloud run deploy --source agent</code> with the <code>Dockerfile</code> in that folder, the same command the venue has used since the start.
-</aside>
 <h3 is-upgraded>Three files that cannot come with you</h3>
 <p>Stop the server and look at what it wrote:</p>
 <pre><code>sessions.db          a SQLite file next to the code
@@ -1584,6 +1561,7 @@ CLOUD_ARTIFACT_SERVICE_URI=gs://your-project-agent-you/artifacts</code></pre>
 <p>With the services ready, give the agent its permanent home.</p>
 <p>👉💻 Three or four minutes. Start it and read on:</p>
 <pre><code class="language-bash">cd ~/monstertix
+. ./set_env.sh
 ./deploy-agent.sh</code></pre>
 <p>That builds <code>agent/</code> into a container, pushes it to Cloud Run, and then wires up three more things. Know what each is for, because &quot;deploy the agent&quot; is only the first of five steps:</p>
 <pre><code>1. gcloud run deploy       the container: your agent, the graph, and the page
@@ -1592,15 +1570,12 @@ CLOUD_ARTIFACT_SERVICE_URI=gs://your-project-agent-you/artifacts</code></pre>
 4. a push subscription     topic ──► /trigger/wake
 5. a Cloud Scheduler job   the alarm clock, on a cron</code></pre>
 <aside class="negative">
-<b>⚠️ ADK ships a trigger endpoint, and this workshop deliberately does not use it.</b> <code>trigger_sources=["pubsub"]</code> mounts <code>/apps/&lt;app&gt;/trigger/pubsub</code>, and its source says exactly what it does with a message:
-<p>&lt;pre&gt;session_id = str(uuid.uuid4())               # a brand new session user_id    = subscription.replace(&quot;/&quot;, &quot;--&quot;)  # and a different user&lt;/pre&gt; That is right for &lt;i&gt;&quot;fire an agent at something&quot;&lt;/i&gt;, where each message is independent work. It is wrong for &lt;i&gt;&quot;go and finish the thing you started&quot;&lt;/i&gt;. A fresh session has no queue ticket, no agreed budget and no memory of the conversation, so the 3am run would not resume your booking — &lt;b&gt;it would start a second one and buy another pair of tickets.&lt;/b&gt; &lt;br&gt;&lt;br&gt; So &lt;code&gt;main.py&lt;/code&gt; adds &lt;code&gt;/trigger/wake&lt;/code&gt;, which lists the sessions for this user, finds the one that is parked on a question, and answers &lt;i&gt;that&lt;/i&gt;. The scheduler pushes there instead. Same Pub/Sub, same retries, same timezone — a different idea about which conversation it belongs to.</p>
+<b>⚠️ Why use <code>/trigger/wake</code> instead of ADK's built-in <code>/apps/&lt;app&gt;/trigger/pubsub</code>?</b><br>
+<p>ADK&#x27;s default trigger creates a brand-new &lt;code&gt;session_id&lt;/code&gt; and &lt;code&gt;user_id&lt;/code&gt; for every incoming message: &lt;pre&gt;session_id = str(uuid.uuid4()) user_id    = subscription.replace(&quot;/&quot;, &quot;--&quot;)&lt;/pre&gt; This works for stateless, one-off tasks. But for long-running workflows, a new session lacks existing context (queue tickets, budget, history) and would trigger a duplicate purchase instead of resuming the pending run. &lt;br&gt;&lt;br&gt; &lt;code&gt;/trigger/wake&lt;/code&gt; finds the user&#x27;s existing parked session and resumes it.</p>
 </aside>
 <p><strong>Why a scheduler.</strong> Go back to <code>clock.py</code> in step 3: sleep, then POST. It worked, and it dies with your terminal. Cloud Scheduler is the same idea run by Google: it fires on a cron, retries if the call fails, understands timezones, and does not care whether your laptop is open. It is the trigger you already built, living somewhere permanent.</p>
 <p><strong>Why Pub/Sub in the middle.</strong> Cloud Scheduler could call your service directly, so the topic looks like an extra step. It buys you three things:</p>
-<pre><code>   Cloud Scheduler ──► Pub/Sub topic ──► push subscription ──► your agent
-     fires on a cron    holds the           delivers, and       runs
-                        message             retries if the
-                                            agent is down</code></pre>
+<p>!<a href="img/10-02-flow.png" target="_blank">alt text</a></p>
 <p><strong>It holds the message.</strong> Let the agent be deploying, restarting, or briefly broken at 3am, and expect the message to wait instead of vanish. <strong>It retries</strong>, so write no retry logic. And <strong>it fans out</strong>: subscribe a second thing that cares about presales to the same topic tomorrow, without touching the scheduler.</p>
 <p>That is why ADK gives you a trigger endpoint rather than expecting you to write one. <code>trigger_sources=[&quot;pubsub&quot;]</code> mounts a route that speaks Pub/Sub&#x27;s push format, so the message arrives as an invocation.</p>
 <pre><code>→ agent    https://concert-you-xxxx.run.app
@@ -1620,69 +1595,30 @@ CLOUD_ARTIFACT_SERVICE_URI=gs://your-project-agent-you/artifacts</code></pre>
 <p>👉 Open the agent&#x27;s URL in a browser. Not the venue panel, not the <strong>ADK web UI</strong> — the service you just deployed. This is MonsterTix, on the internet, with nothing of your laptop involved.</p>
 <p>It knows nothing about you. The memory file went into the bucket, but this is a fresh session with no conversation in it.</p>
 <p>👉✨ Ask it to book:</p>
-<pre><code>Book me two tickets for The Midnight Signal. Best seats in the house,
+<pre><code>Book me 3 tickets for The Midnight Signal in Tokyo. Best seats in the house,
 I don&#x27;t want the cheap ones.</code></pre>
 <p><strong>Watch it ask what you are willing to spend</strong>, exactly as it did on your laptop, and read the number back before committing to it.</p>
 <p>👉✨ Answer the way you would out loud, then confirm:</p>
 <pre><code>up to 250 a seat for the good ones</code></pre>
-<p>Stop on the fact that it asks at all, because the obvious implementation of &quot;don&#x27;t ask at 3am&quot; breaks it.</p>
-<p>Give <code>agree_budget</code> a way to know whether anybody is there to answer. Reach for an environment variable, set <code>UNATTENDED=1</code> on the deploy, and skip the question. Now look at the shape of what you just built:</p>
-<pre><code>  ONE deployed service, TWO kinds of caller
-
-  your browser  ──► /wake                        somebody is plainly here
-  Cloud Sched.  ──► /trigger/wake                nobody is</code></pre>
-<p>Notice both arrive at the same process. Ask a variable read once at boot to tell them apart and it cannot, so setting it silences the question for the browser too. Now you have an agent that spends a number you never agreed to, which is the one thing the whole of Module 5 exists to prevent.</p>
-<p><strong>&quot;Is a person here?&quot; is a fact about a request, not about a process.</strong> So the variable is only the <em>default</em>, unattended, the safe assumption for anything a scheduler can reach, and the <code>/wake</code> route, which only ever runs because somebody typed, overrides it for the length of that one request:</p>
-<pre><code class="language-python"># concert/budget.py
-_attended = contextvars.ContextVar(&quot;attended&quot;, default=None)
-
-def mark_attended(value=True):     # called by /wake, never by the trigger
-    _attended.set(value)
-
-def someone_is_there():
-    marked = _attended.get()
-    return marked if marked is not None else not _UNATTENDED_BY_DEFAULT</code></pre>
-<p>Note a <code>ContextVar</code> is scoped to the asyncio task, which in FastAPI is exactly one request. Two callers, one process, different answers:</p>
-<table>
-<thead><tr><th>Caller</th><th><code>someone_is_there()</code></th><th>What happens</th></tr></thead>
-<tbody>
-<tr><td><code>adk web</code> on your laptop</td><td><code>True</code></td><td>asks, and confirms</td></tr>
-<tr><td>MonsterTix <code>/wake</code>, deployed</td><td><code>True</code></td><td>asks, and confirms</td></tr>
-<tr><td>Pub/Sub at 3am</td><td><code>False</code></td><td>runs on the standing budget, never stops</td></tr>
-</tbody>
-</table>
-<p>👉🔴 Open your venue panel and press <strong>SKIP THE WAIT</strong>, then tell the agent it is at the front:</p>
-<pre><code>You&#x27;re at the front of the queue now.</code></pre>
-<p>👉 Watch the panel while it buys. One order, in a database on the other side of the world, placed by a container you never logged into.</p>
-<h3 is-upgraded>Fire it the way 3am will</h3>
 <p>The run is parked in the queue right now, which is exactly the state 3am finds it in. So be 3am.</p>
 <p>👉🔴 Press <strong>SKIP THE WAIT</strong> on the venue panel, so the queue is ready when the message arrives.</p>
-<p>👉💻 Publish to the topic, which is precisely what Cloud Scheduler does:</p>
-<pre><code class="language-bash">gcloud pubsub topics publish presale-$(gcloud config get-value account | cut -d@ -f1) \
-  --message=&#x27;The presale just opened.&#x27;</code></pre>
-<p>👉 <strong>Now watch the browser, and do not touch it.</strong> Within a few seconds the agent&#x27;s reply appears on its own: it bought the tickets, at a price inside what you agreed, and told you so.</p>
-<p>Nobody typed. Scheduler published, Pub/Sub delivered, your endpoint found the session that was waiting, and the run finished.</p>
-<p>👉🔴 Check the venue panel. <strong>One order, not two.</strong></p>
-<aside class="positive">
-<b>👀 Developer's Note — why the page noticed.</b> A scheduled run finishes on the server, and nothing about that reaches an open browser on its own. So MonsterTix polls <code>/session/&lt;id&gt;/messages?since=&lt;timestamp&gt;</code> every four seconds and prints whatever is new. Unglamorous, and it survives the tab being closed overnight and reopened in the morning — which is the actual use case, and something a websocket would not have survived.
-</aside>
-<aside class="negative">
-<b>⚠️ If it books a second pair of tickets, check where your subscription is pushing.</b>
-<p>&lt;pre&gt;gcloud pubsub subscriptions describe &amp;lt;topic&amp;gt;-push \ --format=&#x27;value(pushConfig.pushEndpoint)&#x27;&lt;/pre&gt; It must end in &lt;code&gt;/trigger/wake&lt;/code&gt;. If it ends in &lt;code&gt;/apps/concert/trigger/pubsub&lt;/code&gt; you are on ADK&#x27;s built-in trigger, which starts a brand new session every fire — so it does not resume your booking, it starts another one. &lt;code&gt;deploy-agent.sh&lt;/code&gt; updates an existing subscription, but a subscription created by hand earlier will keep whatever endpoint it was born with.</p>
-</aside>
 <p><strong>To run it on a real schedule</strong>, the job has to be enabled — <code>jobs run</code> refuses on a paused one with <code>Job.state must be ENABLED</code>:</p>
 <pre><code class="language-bash">gcloud scheduler jobs resume presale-$(gcloud config get-value account | cut -d@ -f1) \
-  --location=us-central1</code></pre>
-<p>And for a demo, make it impatient:</p>
+  --location=$GOOGLE_CLOUD_REGION</code></pre>
+<p>👉 <strong>Now watch the browser, and do not touch it.</strong> Within a few seconds the agent&#x27;s reply appears on its own: it bought the tickets, at a price inside what you agreed, and told you so.</p>
+<p>Nobody typed. Scheduler published, Pub/Sub delivered, your endpoint found the session that was waiting, and the run finished.</p>
+<p>👉🔴 Check the venue panel. <strong>One order.</strong></p>
+<p>Here&#x27;s how you can make it run every 5 mins:</p>
 <pre><code class="language-bash">gcloud scheduler jobs update pubsub presale-$(gcloud config get-value account | cut -d@ -f1) \
-  --location=us-central1 --schedule=&quot;*/5 * * * *&quot;</code></pre>
+  --location=$GOOGLE_CLOUD_REGION --schedule=&quot;*/5 * * * *&quot;</code></pre>
 <aside class="negative">
-<b>⚠️ Pause it again when you are done.</b> An enabled job fires against your venue every night, or every five minutes if you set the impatient schedule above. <code>gcloud scheduler jobs pause &lt;job&gt; --location=us-central1</code>.
+<b>⚠️ Pause it again when you are done.</b> An enabled job fires against your venue every night, or every five minutes if you set the impatient schedule above. <code>gcloud scheduler jobs pause &lt;job&gt; --location=$GOOGLE_CLOUD_REGION</code>.
 </aside>
 <h3 is-upgraded>Check the state is really durable</h3>
 <p>Do this part. It is the claim the whole step rests on.</p>
 <p>👉💻 Your 3am run, as rows in a database that is not on your laptop:</p>
-<pre><code class="language-bash">gcloud sql connect workshop-sessions --user=adk --database=adk</code></pre>
+<pre><code class="language-bash">gcloud sql connect workshop-sessions --user=adk --database=adk
+# password: 1234qwer  — fixed, and printed by setup-cloud-state.sh</code></pre>
 <pre><code class="language-sql">select id, app_name, user_id from sessions;
 select count(*) from events;</code></pre>
 <p>👉💻 And the memory file, as an object in a bucket:</p>

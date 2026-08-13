@@ -78,10 +78,15 @@ gcloud sql databases create "$DB_NAME" --instance="$SQL_INSTANCE" \
   --project "$PROJECT" --quiet 2>/dev/null \
   && echo "→ database  $DB_NAME created" || echo "→ database  $DB_NAME exists"
 
-# Generated, shown once, and written to .env. This is a workshop password for a
-# throwaway instance — in anything real it belongs in Secret Manager and the
-# service reads it from there.
-DB_PASS="${SQL_PASSWORD:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')}"
+# Fixed on purpose, so you can read it off the screen and type it into
+# `gcloud sql connect` without digging through .env. This is a workshop
+# password for a throwaway instance that is deleted at the end of the day.
+#
+# It is NOT a pattern to copy. In anything real this lives in Secret Manager
+# and the service reads it from there, never from a file in the repo.
+#
+#   SQL_PASSWORD=something-else ./setup-cloud-state.sh   to override
+DB_PASS="${SQL_PASSWORD:-1234qwer}"
 if gcloud sql users describe "$DB_USER" --instance="$SQL_INSTANCE" \
      --project "$PROJECT" >/dev/null 2>&1; then
   gcloud sql users set-password "$DB_USER" --instance="$SQL_INSTANCE" \
@@ -150,6 +155,8 @@ echo ""
 echo "✓ durable state ready. Written to .env:"
 echo ""
 echo "   sessions   Cloud SQL   $DB_NAME on $SQL_INSTANCE"
+echo "              connect:  gcloud sql connect $SQL_INSTANCE --user=$DB_USER --database=$DB_NAME"
+echo "              password: $DB_PASS"
 echo "   memory     $BUCKET/memory/"
 echo "   artifacts  $ARTIFACT_URI"
 echo ""

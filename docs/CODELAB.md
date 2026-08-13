@@ -2712,6 +2712,7 @@ Do this part. It is the claim the whole step rests on.
 
 ```bash
 gcloud sql connect workshop-sessions --user=adk --database=adk
+# password: 1234qwer  — fixed, and printed by setup-cloud-state.sh
 ```
 
 ```sql
