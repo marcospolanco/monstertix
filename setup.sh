@@ -71,82 +71,82 @@ if ! command -v gcloud >/dev/null 2>&1; then
 fi
 
 # --- which project? -------------------------------------------------------
-# Everyone brings their own. We work out the most likely answer, then ALWAYS
-# show it and let you correct it. Never adopt one silently: a value can arrive
-# from a .env somebody copied, a shell export from another project, or a gcloud
-# config set months ago, and deploying a student's venue into a stranger's
-# project is not the kind of mistake that announces itself.
+# Two kinds of room run this workshop, and they want opposite things.
 #
-#   PROJECT_ID=x ./setup.sh   skip the prompt entirely
-#   rm ~/project_id.txt       forget the remembered answer
+#   Google Skills  hands you a project and a billing account before you type
+#                  anything, exported as GOOGLE_CLOUD_PROJECT and
+#                  GOOGLE_CLOUD_REGION. Asking a question the platform has
+#                  already answered is just a chance to answer it wrong.
+#
+#   Anywhere else  your laptop, your own account, nothing set up yet. We make a
+#                  project — long-running-<10 random chars> — and attach the
+#                  newest CDP credit. scripts/billing-enablement.py does both.
+#
+# Read _SHELL_PROJECT, never the live GOOGLE_CLOUD_PROJECT: .env was sourced
+# further up, so the live variable may be something THIS script wrote last week.
+# Only the copy captured before that source proves the platform set it.
+#
+#   PROJECT_ID=x ./setup.sh   use x, skip everything below
+#   rm ~/project_id.txt       forget the project an earlier run made
 PROJECT_FILE="$HOME/project_id.txt"
 PROJECT=""
-SUGGESTED=""
 SOURCE=""
 
 if [ -n "${PROJECT_ID:-}" ]; then
-  # Explicitly passed on this command line. That IS the confirmation.
   PROJECT="$PROJECT_ID"
   SOURCE="PROJECT_ID on the command line"
-else
-  if [ -f "$PROJECT_FILE" ]; then
-    SUGGESTED=$(tr -d '[:space:]' < "$PROJECT_FILE")
-    [ -n "$SUGGESTED" ] && SOURCE="remembered in $PROJECT_FILE"
-  fi
-  if [ -z "$SUGGESTED" ] && [ -n "${GOOGLE_CLOUD_PROJECT:-}" ]; then
-    SUGGESTED="$GOOGLE_CLOUD_PROJECT"
-    SOURCE="GOOGLE_CLOUD_PROJECT in your environment"
-  fi
-  if [ -z "$SUGGESTED" ]; then
-    SUGGESTED=$(gcloud config get-value project 2>/dev/null)
-    case "$SUGGESTED" in ""|"(unset)") SUGGESTED="" ;; *) SOURCE="your gcloud config" ;; esac
-  fi
-
-  if [ ! -t 0 ]; then
-    # No terminal to ask on — CI, or a piped run.
-    if [ -n "$SUGGESTED" ]; then
-      PROJECT="$SUGGESTED"
-      echo "→ project    $PROJECT  ($SOURCE, not confirmed — no terminal)"
-    else
-      echo "✗ No project id. Run interactively, or:  PROJECT_ID=your-project ./setup.sh"
-      exit 1
-    fi
-  else
-    echo ""
-    echo "  Which Google Cloud project should this workshop use?"
-    echo "  Everything gets deployed into it, so check this is the one you mean."
-    [ -n "$SUGGESTED" ] && echo "  Suggested: $SUGGESTED  ($SOURCE)"
-    echo "  Find yours at https://console.cloud.google.com  (top-left picker)"
-    echo ""
-    while [ -z "$PROJECT" ]; do
-      if [ -n "$SUGGESTED" ]; then
-        printf "  Project id [%s]: " "$SUGGESTED"
-      else
-        printf "  Project id: "
-      fi
-      read -r ANSWER
-      PROJECT=$(printf '%s' "${ANSWER:-$SUGGESTED}" | tr -d '[:space:]')
-      [ -z "$PROJECT" ] && echo "  (a project id is required)"
-    done
-    echo ""
-  fi
+elif [ -n "$_SHELL_PROJECT" ]; then
+  PROJECT="$_SHELL_PROJECT"
+  SOURCE="GOOGLE_CLOUD_PROJECT — set by your lab platform"
+elif [ -f "$PROJECT_FILE" ] && [ -s "$PROJECT_FILE" ]; then
+  PROJECT=$(tr -d '[:space:]' < "$PROJECT_FILE")
+  [ -n "$PROJECT" ] && SOURCE="remembered in $PROJECT_FILE"
+elif [ -n "${GOOGLE_CLOUD_PROJECT:-}" ]; then
+  PROJECT="$GOOGLE_CLOUD_PROJECT"
+  SOURCE="saved in .env by an earlier run"
 fi
 
-# Prove it exists and we can see it, before anything downstream depends on it.
-if ! gcloud projects describe "$PROJECT" >/dev/null 2>&1; then
-  echo "✗ Cannot access project '$PROJECT'."
-  echo "  Either the id is wrong, or your account has no access to it."
+# Nothing to go on. Offer to make one — but let somebody who already has a
+# project say so. Creating a second project they will never look at again is a
+# worse outcome than one extra question.
+if [ -z "$PROJECT" ] && [ -t 0 ]; then
   echo ""
-  echo "  Projects you can see:"
-  gcloud projects list --format='value(projectId)' 2>/dev/null | sed 's/^/      /' | head -10
+  echo "  No Google Cloud project found for this workshop."
+  echo "  Press Enter and one gets created for you (long-running-… , with a"
+  echo "  billing account attached), or type the id of one you already have."
   echo ""
-  echo "  Then re-run:   rm -f $PROJECT_FILE && ./setup.sh"
+  printf "  Project id [create a new one]: "
+  read -r ANSWER
+  ANSWER=$(printf '%s' "$ANSWER" | tr -d '[:space:]')
+  if [ -n "$ANSWER" ]; then
+    PROJECT="$ANSWER"
+    SOURCE="you typed it"
+  fi
+  echo ""
+fi
+
+# One call, both jobs: reach the project (or create one), then make sure it can
+# be billed. Vertex AI and Cloud Run are both dead without a billing account,
+# and its absence otherwise turns up as a baffling 403 somewhere in Module 1.
+# Human-readable progress goes to stderr and streams straight to the terminal;
+# stdout carries one line, PROJECT=<id>, and nothing else.
+if [ -n "$PROJECT" ]; then
+  BOOTSTRAP=$(.venv/bin/python scripts/billing-enablement.py --project "$PROJECT")
+else
+  BOOTSTRAP=$(.venv/bin/python scripts/billing-enablement.py --create)
+fi
+
+PROJECT=$(printf '%s\n' "$BOOTSTRAP" | sed -n 's/^PROJECT=//p' | tail -1)
+if [ -z "$PROJECT" ]; then
+  echo ""
+  echo "✗ No usable project, so setup stops here — every step from Module 1"
+  echo "  onwards deploys into one. The message above says what to fix."
   exit 1
 fi
 
 printf '%s\n' "$PROJECT" > "$PROJECT_FILE"
 gcloud config set project "$PROJECT" >/dev/null 2>&1
-echo "→ project    $PROJECT  (saved to $PROJECT_FILE — rm it to be asked again)"
+echo "→ project    $PROJECT  (${SOURCE:-created just now} — rm $PROJECT_FILE to start over)"
 
 # Location and region: use whatever is already set, and only fall back if it is
 # not. Somebody with GOOGLE_CLOUD_LOCATION exported has told us where they work,
@@ -198,7 +198,12 @@ else
   printf 'GOOGLE_CLOUD_PROJECT=%s\n' "$PROJECT" >> .env
 fi
 
-for pair in "GOOGLE_CLOUD_LOCATION=$LOCATION" "GOOGLE_CLOUD_REGION=$REGION"; do
+# GOOGLE_GENAI_USE_VERTEXAI is not decoration: the model check below and every
+# ADK process afterwards read it to decide between Vertex AI and the Gemini
+# Developer API, and only one of those works with the ADC we just set up.
+for pair in "GOOGLE_CLOUD_LOCATION=$LOCATION" "GOOGLE_CLOUD_REGION=$REGION" \
+            "GOOGLE_GENAI_USE_VERTEXAI=true" \
+            "ADK_MODEL=${ADK_MODEL:-gemini-2.5-flash}"; do
   key="${pair%%=*}"
   if grep -q "^$key=" .env; then
     sed -i.bak "s|^$key=.*|$pair|" .env && rm -f .env.bak
@@ -279,14 +284,42 @@ else
 fi
 
 # Prove the model actually answers, so nobody discovers a 404 mid-workshop.
+#
+# The client is built with NO arguments on purpose. .env is what `adk web` and
+# every deploy script read, so .env is what this has to test. A check that
+# passes because we hand-built a correct client here, while .env says something
+# else entirely, is worse than no check: it sends a student into Module 1
+# believing the rig works.
 MODEL="${ADK_MODEL:-gemini-2.5-flash}"
-CHECK=$(.venv/bin/python - "$PROJECT" "$LOCATION" "$MODEL" <<'PY' 2>&1
-import sys
+export ADK_MODEL="$MODEL"
+export GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI
+
+CHECK=$(.venv/bin/python - <<'PY' 2>&1
+import os
 try:
     from google import genai
-    c = genai.Client(vertexai=True, project=sys.argv[1], location=sys.argv[2])
-    c.models.generate_content(model=sys.argv[3], contents="hi")
-    print("OK")
+    # Checked BEFORE constructing the client. Without this the SDK raises its
+    # own "No API key was provided ... ai.google.dev" at construction time,
+    # which sends a student off to mint an AI Studio key for a workshop that
+    # authenticates with ADC and never wants one.
+    if os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() not in ("true", "1"):
+        raise RuntimeError(
+            "GOOGLE_GENAI_USE_VERTEXAI is not true in .env, so this would call "
+            "the Gemini Developer API and ask for an API key. Set it to true."
+        )
+    # Reads GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT and
+    # GOOGLE_CLOUD_LOCATION out of the environment, exactly as ADK will.
+    c = genai.Client()
+    if not c.vertexai:
+        # An API key in the environment can still win. Catch it here rather
+        # than letting the quota land somewhere nobody expects.
+        raise RuntimeError(
+            "resolved to the Gemini Developer API despite the .env setting — "
+            "is GOOGLE_API_KEY or GEMINI_API_KEY set in your shell?"
+        )
+    c.models.generate_content(model=os.environ["ADK_MODEL"], contents="hi")
+    print(f"OK {os.environ.get('GOOGLE_CLOUD_PROJECT', '?')} "
+          f"{os.environ.get('GOOGLE_CLOUD_LOCATION', '?')}")
 except Exception as exc:
     print(f"FAIL {type(exc).__name__}: {str(exc)[:160]}")
 PY
@@ -294,7 +327,10 @@ PY
 set -e
 
 if [ "${CHECK:0:2}" = "OK" ]; then
-  echo "→ model      $MODEL responds"
+  # "OK <project> <location>" — the values the client actually resolved out of
+  # .env. Printing them is the point: it is how a stale .env becomes visible.
+  read -r _ CHK_PROJECT CHK_LOCATION <<<"$CHECK"
+  echo "→ model      $MODEL responds  (Vertex AI · $CHK_PROJECT · $CHK_LOCATION)"
 
   # --- 5. The pre-loaded session ------------------------------------------
   # Step 3 opens a session that has already been alive for two days. Without
@@ -394,8 +430,8 @@ else
   echo "  exist on Vertex. Set a pinned id in .env, e.g. ADK_MODEL=gemini-2.5-flash"
   echo "  List what this project actually has:"
   echo ""
+  echo "      set -a; . ./.env; set +a"
   echo "      .venv/bin/python -c \"from google import genai; \\"
-  echo "        [print(m.name) for m in genai.Client(vertexai=True, \\"
-  echo "        project='$PROJECT', location='global').models.list()]\""
+  echo "        [print(m.name) for m in genai.Client().models.list()]\""
   exit 1
 fi
