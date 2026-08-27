@@ -283,7 +283,10 @@ else
   fi
 fi
 
-# Prove the model actually answers, so nobody discovers a 404 mid-workshop.
+# Ask the model one question, so a bad .env shows up here rather than in the
+# middle of Module 1. Reporting only — see the else branch below: this never
+# stops setup, because a 404 on the model id is not a reason to skip building
+# the venue and the seeded session.
 #
 # The client is built with NO arguments on purpose. .env is what `adk web` and
 # every deploy script read, so .env is what this has to test. A check that
@@ -331,98 +334,12 @@ if [ "${CHECK:0:2}" = "OK" ]; then
   # .env. Printing them is the point: it is how a stale .env becomes visible.
   read -r _ CHK_PROJECT CHK_LOCATION <<<"$CHECK"
   echo "→ model      $MODEL responds  (Vertex AI · $CHK_PROJECT · $CHK_LOCATION)"
-
-  # --- 5. The pre-loaded session ------------------------------------------
-  # Step 3 opens a session that has already been alive for two days. Without
-  # this there is nothing to open. Safe to re-run: it rebuilds only the
-  # 'two-days-ago' session and leaves the student's own work alone.
-  if .venv/bin/python -m seed.session >/tmp/seed.log 2>&1; then
-    echo "→ seed       session 'two-days-ago' ready (13 events, 2 days old)"
-  else
-    echo "→ seed       FAILED — step 3 has nothing to open"
-    tail -4 /tmp/seed.log | sed 's/^/               /'
-    echo "               retry with:  python -m seed.session"
-  fi
-
-  # ── Cloud SQL, started now and collected in step 10 ─────────────────────
-  #
-  # Creating a Postgres instance takes eight to twelve minutes, which is most of
-  # a module. Nobody should sit and watch it, so it starts here, in the
-  # background, while the workshop gets on with Module 1 — and step 10 picks up
-  # whatever finished.
-  #
-  # db-f1-micro is the smallest thing Cloud SQL sells. It is the wrong size for
-  # anything real and exactly right for one student's sessions table.
-  SQL_INSTANCE="${SQL_INSTANCE:-workshop-sessions}"
-  if gcloud sql instances describe "$SQL_INSTANCE" --project "$PROJECT" >/dev/null 2>&1; then
-    echo "→ cloudsql   $SQL_INSTANCE already exists"
-  else
-    nohup gcloud sql instances create "$SQL_INSTANCE" \
-      --project "$PROJECT" --database-version=POSTGRES_15 \
-      --tier=db-f1-micro --region="$REGION" \
-      --storage-size=10 --storage-type=HDD --no-backup --quiet \
-      >"$HOME/.cloudsql-create.log" 2>&1 &
-    echo "→ cloudsql   creating $SQL_INSTANCE in the background (~10 min)"
-    echo "             log: ~/.cloudsql-create.log — step 10 needs it, nothing before does"
-  fi
-
-
-  # ── The venue, deployed now so the workshop starts with a world ──────────
-  #
-  # Every student gets their own. A shared one would mean the moment somebody
-  # presses SELL THE GOOD SEATS, everyone else's agent starts failing for no
-  # visible reason. `gcloud run deploy` is idempotent, so re-running setup
-  # redeploys over the top rather than erroring.
-  # Enabling run/cloudbuild a few seconds ago does not mean they are usable
-  # yet — enablement propagates, and the first deploy after it can fail with
-  # "API has not been used in project ... before or it is disabled". So try
-  # twice, with a pause, before believing it.
-  echo "→ venue      deploying to Cloud Run (1-2 min)..."
-  if ! ./deploy-venue.sh >/tmp/venue-deploy.log 2>&1; then
-    if grep -qiE "has not been used in project|is disabled|SERVICE_DISABLED|PERMISSION_DENIED" /tmp/venue-deploy.log; then
-      echo "→ venue      APIs still switching on, waiting 30s and retrying"
-      sleep 30
-      ./deploy-venue.sh >/tmp/venue-deploy.log 2>&1 || true
-    fi
-  fi
-  if grep -q "venue deployed" /tmp/venue-deploy.log; then
-    # gcloud bolds the URL, so a greedy [^ ]* match swallows the trailing ANSI
-    # reset and prints as a stray [m. Matching only URL-safe characters stops at
-    # the escape byte instead, with no sed and no locale trouble.
-    VENUE_URL=$(grep -m1 -ao 'https://venue-[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*' \
-                /tmp/venue-deploy.log)
-    echo "→ venue      deployed  $VENUE_URL"
-  else
-    echo ""
-    echo "  ✗✗✗ THE VENUE DID NOT DEPLOY ✗✗✗"
-    echo ""
-    echo "  Nothing else in this workshop works without it: the agent has no"
-    echo "  world to buy from, and no panel to check its story against."
-    echo ""
-    tail -12 /tmp/venue-deploy.log | sed 's/^/      /'
-    echo ""
-    echo "  Full log:  /tmp/venue-deploy.log"
-    echo "  Retry:     ./deploy-venue.sh"
-    echo ""
-  fi
-
-  echo ""
-  echo "✓ setup complete."
-  echo ""
-  if [ -n "${VENUE_URL:-}" ]; then
-    echo "  your venue:  $VENUE_URL/panel"
-    echo "               keep this tab open all day. It is where you press the buttons,"
-    echo "               and where you check whether the agent actually did what it said."
-  else
-    echo "  ⚠ no venue URL. The agent has nothing to buy from until you run:"
-    echo "               ./deploy-venue.sh"
-  fi
-  echo ""
-  echo "  check it:    ./verify.sh"
-  echo "  then:        source .venv/bin/activate"
-  echo "               adk web agent      # the exact command is in the codelab"
 else
-  echo "→ model      $MODEL FAILED"
+  # NOT fatal. A model that will not answer is worth knowing about now, but
+  # it is not worth stopping setup over: the venue, the seeded session and
+  # Cloud SQL are all still worth having, and Module 1 is the first step that
+  # actually needs the model. There is time to fix this.
+  echo "→ model      $MODEL did not answer — setup continues anyway"
   echo ""
   echo "  $CHECK"
   echo ""
@@ -433,5 +350,94 @@ else
   echo "      set -a; . ./.env; set +a"
   echo "      .venv/bin/python -c \"from google import genai; \\"
   echo "        [print(m.name) for m in genai.Client().models.list()]\""
-  exit 1
 fi
+
+# --- 5. The pre-loaded session ------------------------------------------
+# Step 3 opens a session that has already been alive for two days. Without
+# this there is nothing to open. Safe to re-run: it rebuilds only the
+# 'two-days-ago' session and leaves the student's own work alone.
+if .venv/bin/python -m seed.session >/tmp/seed.log 2>&1; then
+  echo "→ seed       session 'two-days-ago' ready (13 events, 2 days old)"
+else
+  echo "→ seed       FAILED — step 3 has nothing to open"
+  tail -4 /tmp/seed.log | sed 's/^/               /'
+  echo "               retry with:  python -m seed.session"
+fi
+
+# ── Cloud SQL, started now and collected in step 10 ─────────────────────
+#
+# Creating a Postgres instance takes eight to twelve minutes, which is most of
+# a module. Nobody should sit and watch it, so it starts here, in the
+# background, while the workshop gets on with Module 1 — and step 10 picks up
+# whatever finished.
+#
+# db-f1-micro is the smallest thing Cloud SQL sells. It is the wrong size for
+# anything real and exactly right for one student's sessions table.
+SQL_INSTANCE="${SQL_INSTANCE:-workshop-sessions}"
+if gcloud sql instances describe "$SQL_INSTANCE" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "→ cloudsql   $SQL_INSTANCE already exists"
+else
+  nohup gcloud sql instances create "$SQL_INSTANCE" \
+    --project "$PROJECT" --database-version=POSTGRES_15 \
+    --tier=db-f1-micro --region="$REGION" \
+    --storage-size=10 --storage-type=HDD --no-backup --quiet \
+    >"$HOME/.cloudsql-create.log" 2>&1 &
+  echo "→ cloudsql   creating $SQL_INSTANCE in the background (~10 min)"
+  echo "             log: ~/.cloudsql-create.log — step 10 needs it, nothing before does"
+fi
+
+
+# ── The venue, deployed now so the workshop starts with a world ──────────
+#
+# Every student gets their own. A shared one would mean the moment somebody
+# presses SELL THE GOOD SEATS, everyone else's agent starts failing for no
+# visible reason. `gcloud run deploy` is idempotent, so re-running setup
+# redeploys over the top rather than erroring.
+# Enabling run/cloudbuild a few seconds ago does not mean they are usable
+# yet — enablement propagates, and the first deploy after it can fail with
+# "API has not been used in project ... before or it is disabled". So try
+# twice, with a pause, before believing it.
+echo "→ venue      deploying to Cloud Run (1-2 min)..."
+if ! ./deploy-venue.sh >/tmp/venue-deploy.log 2>&1; then
+  if grep -qiE "has not been used in project|is disabled|SERVICE_DISABLED|PERMISSION_DENIED" /tmp/venue-deploy.log; then
+    echo "→ venue      APIs still switching on, waiting 30s and retrying"
+    sleep 30
+    ./deploy-venue.sh >/tmp/venue-deploy.log 2>&1 || true
+  fi
+fi
+if grep -q "venue deployed" /tmp/venue-deploy.log; then
+  # gcloud bolds the URL, so a greedy [^ ]* match swallows the trailing ANSI
+  # reset and prints as a stray [m. Matching only URL-safe characters stops at
+  # the escape byte instead, with no sed and no locale trouble.
+  VENUE_URL=$(grep -m1 -ao 'https://venue-[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*' \
+              /tmp/venue-deploy.log)
+  echo "→ venue      deployed  $VENUE_URL"
+else
+  echo ""
+  echo "  ✗✗✗ THE VENUE DID NOT DEPLOY ✗✗✗"
+  echo ""
+  echo "  Nothing else in this workshop works without it: the agent has no"
+  echo "  world to buy from, and no panel to check its story against."
+  echo ""
+  tail -12 /tmp/venue-deploy.log | sed 's/^/      /'
+  echo ""
+  echo "  Full log:  /tmp/venue-deploy.log"
+  echo "  Retry:     ./deploy-venue.sh"
+  echo ""
+fi
+
+echo ""
+echo "✓ setup complete."
+echo ""
+if [ -n "${VENUE_URL:-}" ]; then
+  echo "  your venue:  $VENUE_URL/panel"
+  echo "               keep this tab open all day. It is where you press the buttons,"
+  echo "               and where you check whether the agent actually did what it said."
+else
+  echo "  ⚠ no venue URL. The agent has nothing to buy from until you run:"
+  echo "               ./deploy-venue.sh"
+fi
+echo ""
+echo "  check it:    ./verify.sh"
+echo "  then:        source .venv/bin/activate"
+echo "               adk web agent      # the exact command is in the codelab"
