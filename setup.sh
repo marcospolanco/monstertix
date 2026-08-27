@@ -130,8 +130,17 @@ fi
 # and its absence otherwise turns up as a baffling 403 somewhere in Module 1.
 # Human-readable progress goes to stderr and streams straight to the terminal;
 # stdout carries one line, PROJECT=<id>, and nothing else.
+# A remembered project can be deleted between runs, or belong to an account
+# this Cloud Shell is no longer signed in as. When the id came from a file
+# rather than from a person, let the bootstrap start over instead of dead-ending
+# on ~/project_id.txt, which no student has ever heard of.
+case "$SOURCE" in
+  remembered*|saved*) RECOVER="--fallback-create" ;;
+  *)                  RECOVER="" ;;
+esac
+
 if [ -n "$PROJECT" ]; then
-  BOOTSTRAP=$(.venv/bin/python scripts/billing-enablement.py --project "$PROJECT")
+  BOOTSTRAP=$(.venv/bin/python scripts/billing-enablement.py --project "$PROJECT" $RECOVER)
 else
   BOOTSTRAP=$(.venv/bin/python scripts/billing-enablement.py --create)
 fi
@@ -298,8 +307,17 @@ export ADK_MODEL="$MODEL"
 export GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI
 
 CHECK=$(.venv/bin/python - <<'PY' 2>&1
-import os
-try:
+import logging, os, time, warnings
+
+# The SDK writes an unsolicited paragraph about automatic function calling to
+# the log on every generate_content. With 2>&1 that lands in the middle of our
+# answer, so silence it — and note the __MODELCHECK__ marker below, which is
+# what makes the shell immune to anything else that decides to print.
+logging.disable(logging.WARNING)
+warnings.filterwarnings("ignore")
+
+
+def attempt():
     from google import genai
     # Checked BEFORE constructing the client. Without this the SDK raises its
     # own "No API key was provided ... ai.google.dev" at construction time,
@@ -321,36 +339,73 @@ try:
             "is GOOGLE_API_KEY or GEMINI_API_KEY set in your shell?"
         )
     c.models.generate_content(model=os.environ["ADK_MODEL"], contents="hi")
-    print(f"OK {os.environ.get('GOOGLE_CLOUD_PROJECT', '?')} "
-          f"{os.environ.get('GOOGLE_CLOUD_LOCATION', '?')}")
-except Exception as exc:
-    print(f"FAIL {type(exc).__name__}: {str(exc)[:160]}")
+
+
+# A project created ninety seconds ago says 403 PERMISSION_DENIED on
+# aiplatform.endpoints.predict for a while after the API is switched on. It is
+# a propagation delay wearing a permissions error's clothes, and it clears on
+# its own, so give it a couple of minutes before believing it.
+SETTLING = ("permission_denied", "403", "has not been used in project",
+            "is disabled", "service_disabled", "unavailable", "503")
+
+last = ""
+for i in range(4):
+    try:
+        attempt()
+        print(f"__MODELCHECK__ OK {os.environ.get('GOOGLE_CLOUD_PROJECT', '?')} "
+              f"{os.environ.get('GOOGLE_CLOUD_LOCATION', '?')}")
+        break
+    except Exception as exc:
+        last = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if i < 3 and any(s in last.lower() for s in SETTLING):
+            print(f"   (Vertex AI not ready yet on this project, retrying in 20s)")
+            time.sleep(20)
+            continue
+        print(f"__MODELCHECK__ FAIL {last}")
+        break
 PY
 )
 set -e
 
-if [ "${CHECK:0:2}" = "OK" ]; then
-  # "OK <project> <location>" — the values the client actually resolved out of
-  # .env. Printing them is the point: it is how a stale .env becomes visible.
-  read -r _ CHK_PROJECT CHK_LOCATION <<<"$CHECK"
-  echo "→ model      $MODEL responds  (Vertex AI · $CHK_PROJECT · $CHK_LOCATION)"
-else
-  # NOT fatal. A model that will not answer is worth knowing about now, but
-  # it is not worth stopping setup over: the venue, the seeded session and
-  # Cloud SQL are all still worth having, and Module 1 is the first step that
-  # actually needs the model. There is time to fix this.
-  echo "→ model      $MODEL did not answer — setup continues anyway"
-  echo ""
-  echo "  $CHECK"
-  echo ""
-  echo "  If that is a 404: '-latest' aliases are AI Studio only and do not"
-  echo "  exist on Vertex. Set a pinned id in .env, e.g. ADK_MODEL=gemini-2.5-flash"
-  echo "  List what this project actually has:"
-  echo ""
-  echo "      set -a; . ./.env; set +a"
-  echo "      .venv/bin/python -c \"from google import genai; \\"
-  echo "        [print(m.name) for m in genai.Client().models.list()]\""
-fi
+# Pick our marker line out of whatever else decided to print. The old test read
+# the first two characters of the whole capture, which an SDK log line at the
+# top silently turned into a failure report on a working rig.
+RESULT=$(printf '%s\n' "$CHECK" | sed -n 's/^__MODELCHECK__ //p' | tail -1)
+
+case "$RESULT" in
+  "OK "*)
+    # "OK <project> <location>" — the values the client actually resolved out of
+    # .env. Printing them is the point: it is how a stale .env becomes visible.
+    read -r _ CHK_PROJECT CHK_LOCATION <<<"$RESULT"
+    echo "→ model      $MODEL responds  (Vertex AI · $CHK_PROJECT · $CHK_LOCATION)"
+    ;;
+  *)
+    # NOT fatal. A model that will not answer is worth knowing about now, but
+    # it is not worth stopping setup over: the venue, the seeded session and
+    # Cloud SQL are all still worth having, and Module 1 is the first step that
+    # actually needs the model. There is time to fix this.
+    echo "→ model      $MODEL did not answer — setup continues anyway"
+    echo ""
+    echo "  ${RESULT:-${CHECK}}"
+    echo ""
+    case "$RESULT" in
+      *403*|*PERMISSION_DENIED*|*permission*)
+        echo "  On a project this new, that is usually Vertex AI still switching"
+        echo "  on rather than anything you did. It clears by itself. Carry on —"
+        echo "  and if Module 1 still cannot reach the model, run ./setup.sh again."
+        ;;
+      *404*|*NOT_FOUND*|*not?found*)
+        echo "  '-latest' aliases are AI Studio only and do not exist on Vertex."
+        echo "  Set a pinned id in .env, e.g. ADK_MODEL=gemini-2.5-flash"
+        echo "  List what this project actually has:"
+        echo ""
+        echo "      set -a; . ./.env; set +a"
+        echo "      .venv/bin/python -c \"from google import genai; \\"
+        echo "        [print(m.name) for m in genai.Client().models.list()]\""
+        ;;
+    esac
+    ;;
+esac
 
 # --- 5. The pre-loaded session ------------------------------------------
 # Step 3 opens a session that has already been alive for two days. Without

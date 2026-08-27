@@ -41,6 +41,7 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import re
 import string
@@ -114,8 +115,55 @@ def project_exists(project_id):
     return ok
 
 
+PROJECT_FILE = os.path.join(os.path.expanduser("~"), "project_id.txt")
+
+
+def remember(project_id):
+    """Write the id down the instant the project exists.
+
+    setup.sh does this too, but only once everything below has succeeded. That
+    is too late: a student who runs setup.sh before claiming their credit gets
+    a project created and then a billing failure, and without this the next run
+    has no idea the first project exists and makes a second one.
+    """
+    try:
+        with open(PROJECT_FILE, "w") as fh:
+            fh.write(project_id + "\n")
+    except OSError:
+        pass  # Nice to have, not worth failing over.
+
+
+def find_workshop_project():
+    """An ACTIVE long-running-* project we made on an earlier run, newest first.
+
+    The belt to remember()'s braces, for when ~/project_id.txt is gone — a fresh
+    Cloud Shell, a different machine, someone who cleaned up. Re-running setup.sh
+    should land back in the project you already have, not litter the account with
+    one more every time.
+    """
+    data, _ = run_json(["gcloud", "projects", "list"], timeout=90)
+    if not isinstance(data, list):
+        return None
+    mine = [
+        p for p in data
+        if p.get("projectId", "").startswith(PROJECT_PREFIX)
+        and p.get("lifecycleState") == "ACTIVE"
+    ]
+    if not mine:
+        return None
+    mine.sort(key=lambda p: p.get("createTime", ""), reverse=True)
+    return mine[0]["projectId"]
+
+
 def create_project():
     """Create long-running-<random>, retrying on the rare id collision."""
+    existing = find_workshop_project()
+    if existing:
+        say(f"   Reusing the workshop project you already have: {existing}")
+        say("   (delete it, or rm ~/project_id.txt, to start somewhere clean)")
+        remember(existing)
+        return existing
+
     for attempt in range(5):
         project_id = new_project_id()
         say(f"   Creating project {project_id} ...")
@@ -126,6 +174,7 @@ def create_project():
         )
         if ok:
             say(f"   ✓ Created {project_id}")
+            remember(project_id)
             return project_id
 
         low = err.lower()
@@ -369,6 +418,8 @@ def main():
     g.add_argument("--project", help="use this existing project")
     g.add_argument("--create", action="store_true",
                    help="create long-running-<random> and bill it")
+    ap.add_argument("--fallback-create", action="store_true",
+                    help="if --project is gone, make a new one instead of failing")
     args = ap.parse_args()
 
     if not active_account():
@@ -384,7 +435,16 @@ def main():
             return 1
     else:
         project_id = args.project
-        if not project_exists(project_id):
+        if not project_exists(project_id) and args.fallback_create:
+            # The id came from ~/project_id.txt or .env, and whatever it named
+            # is gone — deleted, or belonging to an account we are no longer
+            # signed in as. Re-running setup.sh should recover from that rather
+            # than dead-end on a file the student has never heard of.
+            say(f"   '{project_id}' is remembered but unreachable — starting fresh")
+            project_id = create_project()
+            if not project_id:
+                return 1
+        elif not project_exists(project_id):
             say(f"✗ Cannot access project '{project_id}'.")
             say("  Either the id is wrong, or your account has no access to it.")
             ok, out, _ = run(
