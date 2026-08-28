@@ -2705,6 +2705,34 @@ gcloud scheduler jobs update pubsub presale-$(gcloud config get-value account | 
 </aside>
 
 
+Do this part. It is the claim the whole step rests on.
+
+👉💻 Your 3am run, as rows in a database that is not on your laptop:
+
+```bash
+gcloud sql connect workshop-sessions --user=adk --database=adk
+# password: 1234qwer  — fixed, and printed by setup-cloud-state.sh
+```
+
+```sql
+select id, app_name, user_id from sessions;
+select count(*) from events;
+```
+
+👉💻 And the memory file, as an object in a bucket:
+
+```bash
+gcloud storage cat gs://your-project-agent-you/memory/userx.md | head -20
+```
+
+👉 In the Cloud Console, open **Trace**. The run appears as one trace with the
+queue wait as a gap in the middle: the agent doing nothing, for exactly as long
+as it was supposed to do nothing. `deploy-agent.sh` passed `--trace_to_cloud`,
+which is the only reason there is anything to look at.
+
+<aside class="negative">
+<b>⚠️ The interrupt that makes step 9 work will hang this one.</b> <code>agree_budget</code> stops the run and asks what you will spend. In front of a browser that is right. At 3am it is fatal: Pub/Sub delivers a message, the graph stops on a question, and nobody types an answer — so nothing is bought and nothing looks broken. That is what <code>someone_is_there()</code> is for: this run has no person behind it, so <code>agree_budget</code> takes the standing budget instead of stopping. <b>Anything that can stop and ask a person needs a way to know whether a person is there — per request, not per process.</b> The queue pause is different and fine — the next scheduled fire answers that one. A clock can answer a clock; only a person can answer a question.
+</aside>
 
 <aside class="positive">
 <b>👀 Developer's Note — why Pub/Sub caps at ten minutes.</b> A push subscription gives your endpoint a limited window to acknowledge. That is exactly why <code>join_queue</code> returns immediately instead of blocking for forty minutes, and why <code>check_front</code> parks rather than waits. The work has to outlive the request that started it. Every decision in Module 4 was paying for this moment.
